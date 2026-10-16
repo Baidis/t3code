@@ -1,6 +1,12 @@
+// @effect-diagnostics nodeBuiltinImport:off - safe-install tests drive the real filesystem boundary the updater swaps across.
 import { assert, describe, it } from "@effect/vitest";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
-import { beforeEach, vi } from "vite-plus/test";
+import { afterEach, beforeEach, vi } from "vite-plus/test";
 
 const { autoUpdaterMock } = vi.hoisted(() => ({
   autoUpdaterMock: {
@@ -11,6 +17,18 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
     channel: "latest",
     disableDifferentialDownload: false,
     fullChangelog: false,
+    downloadedUpdateHelper: null as null | {
+      readonly file: string | null;
+      readonly downloadedFileInfo: {
+        readonly fileName: string;
+        readonly sha512: string;
+      } | null;
+    },
+    logger: null as null | {
+      readonly info: (...args: ReadonlyArray<unknown>) => void;
+      readonly warn: (...args: ReadonlyArray<unknown>) => void;
+      readonly error: (...args: ReadonlyArray<unknown>) => void;
+    },
     checkForUpdates: vi.fn(() => Promise.resolve(null)),
     downloadUpdate: vi.fn(() => Promise.resolve([])),
     on: vi.fn(),
@@ -20,8 +38,41 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
   },
 }));
 
+const {
+  appQuitMock,
+  autoUpdaterEmitMock,
+  execFileSyncMock,
+  loggerErrorMock,
+  loggerInfoMock,
+  loggerWarnMock,
+  spawnMock,
+  spawnOnMock,
+  spawnUnrefMock,
+} = vi.hoisted(() => ({
+  appQuitMock: vi.fn(),
+  autoUpdaterEmitMock: vi.fn(),
+  execFileSyncMock: vi.fn(),
+  loggerErrorMock: vi.fn(),
+  loggerInfoMock: vi.fn(),
+  loggerWarnMock: vi.fn(),
+  spawnMock: vi.fn(() => ({ pid: 4242, on: spawnOnMock, unref: spawnUnrefMock })),
+  spawnOnMock: vi.fn(),
+  spawnUnrefMock: vi.fn(),
+}));
+
 vi.mock("electron-updater", () => ({
   autoUpdater: autoUpdaterMock,
+}));
+
+vi.mock("electron", () => ({
+  app: { quit: appQuitMock },
+  autoUpdater: { emit: autoUpdaterEmitMock },
+}));
+
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
+  spawn: spawnMock,
+  execFileSync: execFileSyncMock,
 }));
 
 import * as ElectronUpdater from "./ElectronUpdater.ts";
@@ -136,4 +187,262 @@ describe("ElectronUpdater", () => {
       assert.deepEqual(autoUpdaterMock.quitAndInstall.mock.calls, [[true, false]]);
     }).pipe(Effect.provide(ElectronUpdater.layer)),
   );
+
+  describe("safe AppImage install", () => {
+    const ambientAppImage = process.env.APPIMAGE;
+    let tempDirs: string[] = [];
+
+    const trackTempDir = () => {
+      const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "safe-appimage-install-"));
+      tempDirs.push(dir);
+      return dir;
+    };
+
+    const sha512Base64 = (contents: string) =>
+      NodeCrypto.createHash("sha512").update(contents, "utf8").digest("base64");
+
+    const flushImmediate = () =>
+      Effect.promise(() => new Promise<void>((resolve) => setImmediate(resolve)));
+
+    const provideLinux = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+      effect.pipe(
+        Effect.provide(ElectronUpdater.layer),
+        Effect.provideService(HostProcess.Platform, "linux"),
+      );
+
+    beforeEach(() => {
+      tempDirs = [];
+      delete process.env.APPIMAGE;
+      autoUpdaterMock.downloadedUpdateHelper = null;
+      autoUpdaterMock.logger = {
+        info: loggerInfoMock,
+        warn: loggerWarnMock,
+        error: loggerErrorMock,
+      };
+      appQuitMock.mockClear();
+      autoUpdaterEmitMock.mockClear();
+      execFileSyncMock.mockClear();
+      loggerErrorMock.mockClear();
+      loggerInfoMock.mockClear();
+      loggerWarnMock.mockClear();
+      spawnMock.mockClear();
+      spawnOnMock.mockClear();
+      spawnUnrefMock.mockClear();
+    });
+
+    afterEach(() => {
+      if (ambientAppImage === undefined) {
+        delete process.env.APPIMAGE;
+      } else {
+        process.env.APPIMAGE = ambientAppImage;
+      }
+      for (const dir of tempDirs) {
+        NodeFS.rmSync(dir, { recursive: true, force: true });
+      }
+      tempDirs = [];
+    });
+
+    it.effect("refuses a 0-byte download and leaves the running AppImage intact", () =>
+      provideLinux(
+        Effect.gen(function* () {
+          const dir = trackTempDir();
+          const appImage = NodePath.join(dir, "T3-Code-x86_64.AppImage");
+          const installer = NodePath.join(dir, "pending.AppImage");
+          NodeFS.writeFileSync(appImage, "running-binary");
+          NodeFS.chmodSync(appImage, 0o755);
+          // The exact #10685 symptom: a 0-byte download where a verified artifact was expected.
+          NodeFS.writeFileSync(installer, "");
+          process.env.APPIMAGE = appImage;
+          autoUpdaterMock.downloadedUpdateHelper = {
+            file: installer,
+            downloadedFileInfo: {
+              fileName: "T3-Code-x86_64.AppImage",
+              sha512: sha512Base64("expected-binary"),
+            },
+          };
+
+          const updater = yield* ElectronUpdater.ElectronUpdater;
+          const error = yield* updater
+            .quitAndInstall({ isSilent: true, isForceRunAfter: true })
+            .pipe(Effect.flip);
+
+          assert.instanceOf(error, ElectronUpdater.ElectronUpdaterQuitAndInstallError);
+          assert.equal(autoUpdaterMock.quitAndInstall.mock.calls.length, 0);
+          assert.equal(appQuitMock.mock.calls.length, 0);
+          assert.equal(NodeFS.readFileSync(appImage, "utf8"), "running-binary");
+          assert.equal(NodeFS.statSync(appImage).mode & 0o111, 0o111);
+        }),
+      ),
+    );
+
+    it.effect("refuses a hash mismatch and leaves the running AppImage intact", () =>
+      provideLinux(
+        Effect.gen(function* () {
+          const dir = trackTempDir();
+          const appImage = NodePath.join(dir, "T3-Code-x86_64.AppImage");
+          const installer = NodePath.join(dir, "pending.AppImage");
+          NodeFS.writeFileSync(appImage, "running-binary");
+          NodeFS.writeFileSync(installer, "corrupted-binary");
+          process.env.APPIMAGE = appImage;
+          autoUpdaterMock.downloadedUpdateHelper = {
+            file: installer,
+            downloadedFileInfo: {
+              fileName: "T3-Code-x86_64.AppImage",
+              sha512: sha512Base64("expected-binary"),
+            },
+          };
+
+          const updater = yield* ElectronUpdater.ElectronUpdater;
+          const error = yield* updater
+            .quitAndInstall({ isSilent: true, isForceRunAfter: true })
+            .pipe(Effect.flip);
+
+          assert.instanceOf(error, ElectronUpdater.ElectronUpdaterQuitAndInstallError);
+          assert.equal(autoUpdaterMock.quitAndInstall.mock.calls.length, 0);
+          assert.equal(appQuitMock.mock.calls.length, 0);
+          assert.equal(NodeFS.readFileSync(appImage, "utf8"), "running-binary");
+        }),
+      ),
+    );
+
+    it.effect("replaces the same AppImage path with an atomic rename", () =>
+      provideLinux(
+        Effect.gen(function* () {
+          const dir = trackTempDir();
+          const appImage = NodePath.join(dir, "T3-Code-x86_64.AppImage");
+          const installer = NodePath.join(dir, "pending.AppImage");
+          NodeFS.writeFileSync(appImage, "running-binary");
+          NodeFS.chmodSync(appImage, 0o755);
+          NodeFS.writeFileSync(installer, "new-binary");
+          process.env.APPIMAGE = appImage;
+          autoUpdaterMock.downloadedUpdateHelper = {
+            file: installer,
+            downloadedFileInfo: {
+              fileName: "T3-Code-x86_64.AppImage",
+              sha512: sha512Base64("new-binary"),
+            },
+          };
+
+          const updater = yield* ElectronUpdater.ElectronUpdater;
+          yield* updater.quitAndInstall({ isSilent: true, isForceRunAfter: true });
+
+          assert.equal(NodeFS.readFileSync(appImage, "utf8"), "new-binary");
+          assert.equal(NodeFS.statSync(appImage).mode & 0o777, 0o755);
+          assert.equal(autoUpdaterMock.quitAndInstall.mock.calls.length, 0);
+          assert.equal(spawnMock.mock.calls.length, 1);
+          const [command, args, options] = spawnMock.mock.calls[0] as unknown as [
+            string,
+            ReadonlyArray<string>,
+            { readonly detached: boolean; readonly env: Record<string, string | undefined> },
+          ];
+          assert.equal(command, appImage);
+          assert.deepEqual(args, []);
+          assert.equal(options.detached, true);
+          assert.equal(options.env.APPIMAGE_SILENT_INSTALL, "true");
+          assert.isAbove(loggerInfoMock.mock.calls.length, 0);
+
+          yield* flushImmediate();
+          assert.deepEqual(autoUpdaterEmitMock.mock.calls, [["before-quit-for-update"]]);
+          assert.equal(appQuitMock.mock.calls.length, 1);
+        }),
+      ),
+    );
+
+    it.effect("replaces the same stable path again on a second update", () =>
+      provideLinux(
+        Effect.gen(function* () {
+          const dir = trackTempDir();
+          const appImage = NodePath.join(dir, "T3-Code-x86_64.AppImage");
+          const installer = NodePath.join(dir, "pending.AppImage");
+          NodeFS.writeFileSync(appImage, "v1-binary");
+          NodeFS.writeFileSync(installer, "v2-binary");
+          process.env.APPIMAGE = appImage;
+          const updater = yield* ElectronUpdater.ElectronUpdater;
+
+          autoUpdaterMock.downloadedUpdateHelper = {
+            file: installer,
+            downloadedFileInfo: {
+              fileName: "T3-Code-x86_64.AppImage",
+              sha512: sha512Base64("v2-binary"),
+            },
+          };
+          yield* updater.quitAndInstall({ isSilent: true, isForceRunAfter: true });
+          assert.equal(NodeFS.readFileSync(appImage, "utf8"), "v2-binary");
+
+          NodeFS.writeFileSync(installer, "v3-binary");
+          autoUpdaterMock.downloadedUpdateHelper = {
+            file: installer,
+            downloadedFileInfo: {
+              fileName: "T3-Code-x86_64.AppImage",
+              sha512: sha512Base64("v3-binary"),
+            },
+          };
+          yield* updater.quitAndInstall({ isSilent: true, isForceRunAfter: true });
+
+          assert.equal(NodeFS.readFileSync(appImage, "utf8"), "v3-binary");
+          assert.equal(NodeFS.existsSync(appImage), true);
+          assert.equal(autoUpdaterMock.quitAndInstall.mock.calls.length, 0);
+        }),
+      ),
+    );
+
+    it.effect("keeps a symlink and desktop Exec pointed at the replaced path", () =>
+      provideLinux(
+        Effect.gen(function* () {
+          const dir = trackTempDir();
+          const appImage = NodePath.join(dir, "T3-Code-x86_64.AppImage");
+          const installer = NodePath.join(dir, "pending.AppImage");
+          const symlink = NodePath.join(dir, "t3-code.AppImage");
+          const desktop = NodePath.join(dir, "t3-code.desktop");
+          NodeFS.writeFileSync(appImage, "running-binary");
+          NodeFS.chmodSync(appImage, 0o755);
+          NodeFS.writeFileSync(installer, "new-binary");
+          NodeFS.symlinkSync(appImage, symlink);
+          NodeFS.writeFileSync(desktop, `[Desktop Entry]\nExec="${appImage}" --no-sandbox %U\n`);
+          process.env.APPIMAGE = appImage;
+          autoUpdaterMock.downloadedUpdateHelper = {
+            file: installer,
+            downloadedFileInfo: {
+              fileName: "T3-Code-x86_64.AppImage",
+              sha512: sha512Base64("new-binary"),
+            },
+          };
+
+          const updater = yield* ElectronUpdater.ElectronUpdater;
+          yield* updater.quitAndInstall({ isSilent: true, isForceRunAfter: true });
+
+          assert.equal(NodeFS.readFileSync(appImage, "utf8"), "new-binary");
+          assert.equal(NodeFS.realpathSync(symlink), appImage);
+          assert.equal(NodeFS.readFileSync(symlink, "utf8"), "new-binary");
+          assert.include(NodeFS.readFileSync(desktop, "utf8"), `Exec="${appImage}"`);
+        }),
+      ),
+    );
+
+    it.effect("delegates to stock quitAndInstall when APPIMAGE is not set", () =>
+      provideLinux(
+        Effect.gen(function* () {
+          const updater = yield* ElectronUpdater.ElectronUpdater;
+
+          yield* updater.quitAndInstall({ isSilent: true, isForceRunAfter: true });
+
+          assert.deepEqual(autoUpdaterMock.quitAndInstall.mock.calls, [[true, true]]);
+          assert.equal(appQuitMock.mock.calls.length, 0);
+        }),
+      ),
+    );
+
+    it.effect("wires the electron-updater logger", () =>
+      provideLinux(
+        Effect.gen(function* () {
+          const updater = yield* ElectronUpdater.ElectronUpdater;
+          const logger = { info: () => {}, warn: () => {}, error: () => {} };
+
+          yield* updater.setLogger(logger);
+
+          assert.strictEqual(autoUpdaterMock.logger, logger);
+        }),
+      ),
+    );
+  });
 });
