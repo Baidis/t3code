@@ -2,7 +2,9 @@
 
 This directory maintains the [`t3code-bin`](https://aur.archlinux.org/packages/t3code-bin) and
 [`t3code-nightly-bin`](https://aur.archlinux.org/packages/t3code-nightly-bin) packages. Both
-repackage the official x86_64 AppImage from GitHub Releases.
+repackage the official x86_64 AppImage from GitHub Releases. The release script prefers
+`T3-Code-x86_64.AppImage` and falls back to the versioned filename for older tags. The
+PKGBUILD keeps a versioned local filename so makepkg caches stay distinct.
 
 ## Publishing
 

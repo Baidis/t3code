@@ -2890,6 +2890,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     buildConfig.toolsets = { appimage: "1.0.3" };
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
+    // AppImage-only override. Root artifactName stays versioned so .deb, macOS,
+    // and Windows keep T3-Code-${version}-${arch}.${ext}. latest-linux.yml then
+    // lists T3-Code-<arch>.AppImage next to the versioned .deb.
+    buildConfig.appImage = {
+      artifactName: "T3-Code-${arch}.${ext}",
+    };
     buildConfig.linux = {
       // The .deb is built from the same unpacked app after the AppImage.
       // electron-builder lists both in latest-linux.yml and writes

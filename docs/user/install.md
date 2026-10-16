@@ -77,6 +77,11 @@ The `.deb` updates itself like the other desktop builds. It asks for your
 password to install each update. If your desktop has no password prompt, the
 update fails. Download the new `.deb` and install it the same way.
 
+Linux AppImage releases use a stable filename, `T3-Code-x86_64.AppImage` or
+`T3-Code-arm64.AppImage`. In-app updates replace that file without changing its
+path. If you installed an older versioned AppImage, update your desktop entry or
+symlink to the stable filename after the first upgrade.
+
 ### The `t3` command
 
 The desktop app includes the `t3` command-line tool. To run it from any

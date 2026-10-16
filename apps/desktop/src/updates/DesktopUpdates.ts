@@ -204,6 +204,7 @@ const {
   logInfo: logUpdaterInfo,
   logWarning: logUpdaterWarning,
   logError: logUpdaterError,
+  logDebug: logUpdaterDebug,
 } = DesktopObservability.makeComponentLogger("desktop-updater");
 
 function redactMessage(message: string): string {
@@ -763,6 +764,9 @@ export const make = Effect.gen(function* () {
             (instance) => instance.stop({ timeout: Duration.seconds(5) }),
             { concurrency: "unbounded" },
           );
+          yield* logUpdaterInfo("installing update", {
+            version: expectedVersion ?? downloadedVersion,
+          });
           yield* electronUpdater.quitAndInstall({
             isSilent: true,
             isForceRunAfter: true,
@@ -1074,6 +1078,20 @@ export const make = Effect.gen(function* () {
       yield* electronUpdater.setDisableDifferentialDownload(
         isArm64HostRunningIntelBuild(environment.runtimeInfo),
       );
+      yield* electronUpdater.setLogger({
+        info: (message) => {
+          runEffect(logUpdaterInfo(message));
+        },
+        warn: (message) => {
+          runEffect(logUpdaterWarning(message));
+        },
+        error: (message) => {
+          runEffect(logUpdaterError(message));
+        },
+        debug: (message) => {
+          runEffect(logUpdaterDebug(message));
+        },
+      });
 
       if (isArm64HostRunningIntelBuild(environment.runtimeInfo)) {
         yield* logUpdaterInfo(

@@ -32,6 +32,11 @@ If a desktop app restarts on its old version, T3 Code tells you the update did
 not apply. It does not install that version again on its own, even when another
 device asks. Use the update button on that machine to retry.
 
+Linux AppImage updates replace `T3-Code-x86_64.AppImage` or
+`T3-Code-arm64.AppImage` in place. If you still launch a versioned filename,
+point the desktop entry or symlink at the stable name once after that first
+upgrade. Later updates keep that path.
+
 The confirmation counts the running threads that the restarts will interrupt,
 and how many can resume afterwards. See **Continue threads after restarts**
 below.

@@ -738,6 +738,15 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.deepStrictEqual(linux.toolsets, { appimage: "1.0.3" });
       assert.notProperty(mac, "toolsets");
       assert.notProperty(win, "toolsets");
+      // Root artifactName stays versioned for mac, Windows, and .deb.
+      assert.equal(mac.artifactName, "T3-Code-${version}-${arch}.${ext}");
+      assert.equal(linux.artifactName, "T3-Code-${version}-${arch}.${ext}");
+      assert.equal(win.artifactName, "T3-Code-${version}-${arch}.${ext}");
+      assert.notProperty(linux.linux as Record<string, unknown>, "artifactName");
+      assert.notProperty(linux.deb as Record<string, unknown>, "artifactName");
+      assert.deepStrictEqual(linux.appImage, { artifactName: "T3-Code-${arch}.${ext}" });
+      assert.notProperty(mac, "appImage");
+      assert.notProperty(win, "appImage");
       assert.deepStrictEqual(mac.files, [...DESKTOP_FILE_EXCLUSIONS, ...MAC_FILE_EXCLUSIONS]);
       assert.deepStrictEqual(linux.files, [...DESKTOP_FILE_EXCLUSIONS, ...LINUX_FILE_EXCLUSIONS]);
       assert.deepStrictEqual(win.files, DESKTOP_FILE_EXCLUSIONS);
@@ -752,6 +761,50 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         assert.deepStrictEqual(config.electronLanguages, DESKTOP_ELECTRON_LANGUAGES);
       }
       assert.deepStrictEqual(mac.electronLanguages, DESKTOP_ELECTRON_LANGUAGES);
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("keeps Linux AppImage artifact names stable and latest-linux.yml paths resolvable", () =>
+    Effect.gen(function* () {
+      const linux = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const nightly = yield* createBuildConfig(
+        "linux",
+        "AppImage",
+        "1.2.3-nightly.20260413.42",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const interpolate = (template: string, arch: string, ext: string, version = "1.2.3") =>
+        template
+          .replaceAll("${version}", version)
+          .replaceAll("${arch}", arch)
+          .replaceAll("${ext}", ext);
+
+      const appImageTemplate = (linux.appImage as { artifactName: string }).artifactName;
+      const rootTemplate = linux.artifactName as string;
+      assert.equal(appImageTemplate, "T3-Code-${arch}.${ext}");
+      assert.equal(rootTemplate, "T3-Code-${version}-${arch}.${ext}");
+      assert.equal(
+        (nightly.appImage as { artifactName: string }).artifactName,
+        "T3-Code-${arch}.${ext}",
+      );
+
+      // electron-builder writes these interpolated names into latest-linux.yml
+      // as files[].url / path. GitHub releases host the same basename.
+      assert.equal(interpolate(appImageTemplate, "x86_64", "AppImage"), "T3-Code-x86_64.AppImage");
+      assert.equal(interpolate(appImageTemplate, "arm64", "AppImage"), "T3-Code-arm64.AppImage");
+      assert.equal(interpolate(rootTemplate, "x86_64", "deb"), "T3-Code-1.2.3-x86_64.deb");
+      assert.equal(interpolate(rootTemplate, "arm64", "deb"), "T3-Code-1.2.3-arm64.deb");
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
 
